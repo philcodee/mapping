@@ -82,6 +82,44 @@ the projector and press <kbd>F</kbd> for fullscreen.
    detection mode (brightest spot or motion), and the detected point is
    converted to true-geometry coordinates and sent to the other pages, which
    mark it and highlight any polygon it falls inside.
+   *Hand* mode tracks index fingertips with
+   [MediaPipe's hand landmarker](https://ai.google.dev/edge/mediapipe/solutions/vision/hand_landmarker),
+   which is loaded from a CDN the first time it is picked (the only part of
+   the demo that needs the internet). Rest a fingertip on a polygon for about
+   half a second to switch it on or off: a ring around the fingertip marker
+   fills up, and a polygon that is on is drawn solid on every page. Lift the
+   finger off and put it back to switch it again. If the camera is mounted
+   upside down, tick *Rotate 180°* under *Webcam*.
+   **Pointer tags:** tick *Track pointer tags* to follow ArUco tags 40 and
+   41 (`DICT_4X4_50`, printed by `prototype/tools/make_pointer_tags.py`). Each
+   tag casts a narrow beam from its printed top edge to the first polygon
+   edge in front of it, in the tag's mapping set. From outside a polygon the
+   beam enters it; from inside, it stops at that polygon's own edge, and an
+   edge shared by two polygons counts as the neighbour. Every page draws the
+   beam and highlights its target. The beam pulses 8 times a second within 10
+   true-geometry units of the target, slowing to once a second at 500 or
+   more (`BEAM` in `shared.js`). This replaces the prototype's sonar clicks.
+   Hold a beam on one polygon for a second and it blows up: a white ring
+   fills around the hit point, then the polygon flashes and shatters into
+   pieces that fly apart under a shockwave. It stays away for 3 seconds and
+   fades back in (`EXPLODE` in `shared.js`). This is display only: the
+   polygon's shape is never changed. To blow it up again, aim off it and
+   back.
+
+   **Game:** press <kbd>T</kbd> (or *Game*) on a projector to keep four
+   pixel-art fruit flies hovering inside the active set's A–D area. Small
+   flies need one pointer; big flies need two at once. Each needs holding
+   for 1, 2 or 3 seconds. A white ring around a fly fills while enough
+   pointers are on it, and drains when there are too few. A big fly with
+   only one pointer on it says "Needs 2 players". A blown-up fly bursts into
+   its pixels and is gone for good, and a new one appears somewhere else.
+   The sprite is `FLY` in `shared.js`, two frames of text where each
+   character is a colour from `FLY_COLORS`. Each sprite pixel is drawn
+   through the mapping, so the flies lie flat on the surface. Pressing <kbd>T</kbd> again removes the targets.
+   Settings are in `GAME` in `projector.js`. That projector tab decides when
+   targets blow up, because it sees every camera's pointers, so run the game
+   on one projector tab only.
+   Detection runs in `aruco.worker.js` using js-aruco2 (`vendor/`, MIT).
 6. **Several projectors or cameras** — the **＋** button next to the view
    selector opens another projector or camera in a new tab; the selector
    switches a tab to a different view. In each view, tick the mapping sets it

@@ -21,7 +21,8 @@
 //   camera,    key=view the same for one camera view; quads normalised to the
 //                       video frame
 //   detections, key=tab [{ x, y, source, setId, view }] in true-geometry
-//                       coordinates, from one camera tab
+//                       coordinates, from one camera tab. Pointer tags add
+//                       name and aim: { heading, hit: { polyId, name, dist, pt } | null }
 //   hello               a page just opened; the others re-broadcast their own state
 
 const PM = (() => {
@@ -44,7 +45,9 @@ const PM = (() => {
   const VIEW_TOPICS = ['projector', 'camera'];
   const state = {
     geometry: {
-      polygons: [], // { id, name, color, setId, points: [[x,y], ...] }
+      polygons: [], // { id, name, color, setId, points: [[x,y], ...], on?, toggledAt?, explodedAt?,
+                    //   game?, need?, holdMs? (targets spawned by a projector's game mode),
+                    //   sprite?: 'fly', center?, size?, heading? (drawn as a fruit fly; points = hit area) }
       sets: [],     // { id, name, color, refs: [[x,y] x4] }
     },
     active: null,
@@ -327,14 +330,444 @@ const PM = (() => {
   }
 
   // Polygons of the detection's own mapping set that contain it.
+  // Polygons blown up by a pointer don't count until they have come back.
   const polygonsAt = (d) => state.geometry.polygons
-    .filter((poly) => poly.setId === d.setId && pointInPolygon([d.x, d.y], poly.points));
+    .filter((poly) => poly.setId === d.setId && !isGone(poly) && pointInPolygon([d.x, d.y], poly.points));
 
-  // Ids of polygons containing at least one current detection.
+  // ---- Explosions -------------------------------------------------------
+  // A pointer held on a polygon blows it up: `explodedAt` (a Date.now() time,
+  // set by the camera page and shared with the geometry) starts a burst on
+  // every page, then the polygon stays away and fades back in. Display only:
+  // its points never change.
+
+  const EXPLODE = {
+    dwellMs: 1000, // how long a pointer must stay on a polygon
+    burstMs: 1200, // flash, shockwave and flying pieces
+    goneMs: 3000,  // then nothing
+    fadeMs: 800,   // then it fades back in
+  };
+  const EXPLODE_TOTAL = EXPLODE.burstMs + EXPLODE.goneMs + EXPLODE.fadeMs;
+  const explodeAge = (poly) => (poly.explodedAt ? Date.now() - poly.explodedAt : Infinity);
+  function isGone(poly) {
+    const age = explodeAge(poly);
+    return age >= 0 && age < EXPLODE_TOTAL;
+  }
+
+  // Small seeded random generator, so every page breaks a polygon the same way.
+  function seededRandom(text) {
+    let h = 2166136261;
+    for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i), 16777619);
+    return () => {
+      h = (h + 0x6d2b79f5) | 0;
+      let t = Math.imul(h ^ (h >>> 15), 1 | h);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  // ---- Fruit fly sprites --------------------------------------------------
+  // Game targets are drawn as pixel-art fruit flies instead of polygons. A
+  // fly's polygon is only its (invisible) hit area for pointer beams; the
+  // sprite is drawn around `center` at `size` (true-geometry units across),
+  // facing `heading`. Each sprite pixel is mapped as its own quad, so a fly
+  // lies flat on the surface in the projector's perspective.
+
+  // A projector can't show black, so the darkest parts are still mid-tones.
+  const FLY_COLORS = {
+    A: '#9a7048', // antennae
+    R: '#e8262b', // eyes: big and red, the fruit fly's tell
+    r: '#ff8a7a', // eye shine
+    H: '#a8825c', // head
+    T: '#9c7a58', // thorax: muted tan-brown, nothing yellow or striped
+    t: '#7d5e42', // thorax marks
+    Y: '#b39370', // abdomen
+    D: '#7d5e42', // darker tip
+    L: '#9a7048', // legs
+    W: '#e8f6ff', // wing
+    w: '#9fbccc', // wing vein
+  };
+  const WING_ALPHA = 0.45;
+  // Two frames, head up: wings folded back over the body past the tail (at
+  // rest), then swung out mid-beat.
+  const FLY = [[
+    '......A...A......',
+    '.......A.A.......',
+    '....RRRHHHRRR....',
+    '....RrRHHHRrR....',
+    '.....RRTTTRR.....',
+    '...L..TTtTT..L...',
+    '....L.TTTTT.L....',
+    '...L.WWTTTWW.L...',
+    '.....WWYYYWW.....',
+    '....WWwYYYwWW....',
+    '....WWWYYYWWW....',
+    '...WWwWYYYWwWW...',
+    '...WWWWYYYWWWW...',
+    '...WWwWDDDWwWW...',
+    '...WWWW.D.WWWW...',
+    '....WWW...WWW....',
+    '.....W.....W.....',
+  ], [
+    '......A...A......',
+    '.......A.A.......',
+    '....RRRHHHRRR....',
+    '....RrRHHHRrR....',
+    '.....RRTTTRR.....',
+    'WW.L..TTtTT..L.WW',
+    'WWWWL.TTTTT.LWWWW',
+    '.WWwWWTTTTTWWwWW.',
+    '..WWWWWYYYWWWWW..',
+    '....WWwYYYwWW....',
+    '.......YYY.......',
+    '...L...YYY...L...',
+    '.......YYY.......',
+    '.......DDD.......',
+    '........D........',
+    '.................',
+    '.................',
+  ]];
+
+  // Where a fly is right now: hovering, wobbling and flapping, the same on
+  // every page because it depends only on the clock and the fly's id.
+  function flyPose(poly, now) {
+    const phase = seededRandom(poly.id)() * Math.PI * 2;
+    const s = poly.size;
+    return {
+      c: [
+        poly.center[0] + Math.sin(now / 170 + phase) * s * 0.05 + Math.sin(now / 53 + phase * 2) * s * 0.015,
+        poly.center[1] + Math.cos(now / 190 + phase * 1.3) * s * 0.05 + Math.cos(now / 61 + phase) * s * 0.015,
+      ],
+      heading: poly.heading + Math.sin(now / 400 + phase) * 0.2,
+      frame: Math.floor(now / 45 + phase * 3) % 2, // about 11 wing beats a second
+    };
+  }
+
+  // The sprite's pixels as quads in true geometry: { pts, c, color, alpha }.
+  function spritePixels(poly, pose) {
+    const grid = FLY[pose.frame];
+    const cols = grid[0].length, rows = grid.length;
+    const px = poly.size / cols, e = px * 0.04; // a hair of overlap hides seams
+    // Head is up (-y) in the grid; heading 0 means facing +x.
+    const a = pose.heading + Math.PI / 2, cos = Math.cos(a), sin = Math.sin(a);
+    const at = (x, y) => [pose.c[0] + x * cos - y * sin, pose.c[1] + x * sin + y * cos];
+    const out = [];
+    grid.forEach((line, row) => {
+      for (let col = 0; col < cols; col++) {
+        const ch = line[col];
+        if (ch === '.') continue;
+        const x0 = (col - cols / 2) * px - e, x1 = x0 + px + 2 * e;
+        const y0 = (row - rows / 2) * px - e, y1 = y0 + px + 2 * e;
+        out.push({
+          pts: [at(x0, y0), at(x1, y0), at(x1, y1), at(x0, y1)],
+          c: at((x0 + x1) / 2, (y0 + y1) / 2),
+          color: FLY_COLORS[ch],
+          alpha: ch === 'W' || ch === 'w' ? WING_ALPHA : 1,
+        });
+      }
+    });
+    return out;
+  }
+
+  function drawFly(ctx, map, poly, fade, hit) {
+    const pose = flyPose(poly, Date.now());
+    // One path per colour, so a fly is a dozen fills rather than hundreds.
+    const groups = new Map();
+    for (const p of spritePixels(poly, pose)) {
+      const key = p.color + p.alpha;
+      if (!groups.has(key)) groups.set(key, { color: p.color, alpha: p.alpha, quads: [] });
+      groups.get(key).quads.push(p.pts);
+    }
+    ctx.save();
+    for (const g of groups.values()) {
+      ctx.beginPath();
+      for (const quad of g.quads) {
+        const q = quad.map(map);
+        if (q.some((p) => !p)) continue;
+        q.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+        ctx.closePath();
+      }
+      ctx.globalAlpha = fade * g.alpha;
+      ctx.fillStyle = g.color;
+      ctx.fill();
+    }
+    if (hit) { // aimed at: a ring around it, flat on the surface
+      const r = poly.size * 0.65;
+      const ring = Array.from({ length: 32 }, (_, i) => {
+        const a = (i / 32) * Math.PI * 2;
+        return map([pose.c[0] + Math.cos(a) * r, pose.c[1] + Math.sin(a) * r]);
+      });
+      if (ring.every(Boolean)) {
+        ctx.beginPath();
+        ring.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+        ctx.closePath();
+        ctx.globalAlpha = fade * 0.8;
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+
+  // Pieces of one explosion, in true geometry. A fly bursts into its own
+  // sprite pixels. A polygon has each edge cut into short segments, and each
+  // slice from the centre to a segment cut again into an inner triangle and
+  // an outer quad.
+  const bursts = new Map();
+  function burstPieces(poly) {
+    const key = `${poly.id}:${poly.explodedAt}`;
+    if (bursts.has(key)) return bursts.get(key);
+    const rnd = seededRandom(key);
+    if (poly.sprite === 'fly') {
+      const pose = flyPose(poly, poly.explodedAt);
+      const pieces = spritePixels(poly, pose).map((p) => {
+        let angle = Math.atan2(p.c[1] - pose.c[1], p.c[0] - pose.c[0]) + (rnd() - 0.5) * 0.8;
+        return {
+          pts: p.pts, c: p.c, color: p.color, alpha: p.alpha,
+          dir: [Math.cos(angle), Math.sin(angle)],
+          speed: poly.size * (0.6 + 1.8 * rnd()),
+          spin: (rnd() - 0.5) * 10,
+        };
+      });
+      const burst = { c0: pose.c, size: poly.size * 0.6, pieces };
+      bursts.set(key, burst);
+      return burst;
+    }
+    const c0 = centroid(poly.points);
+    const xs = poly.points.map((p) => p[0]), ys = poly.points.map((p) => p[1]);
+    const size = Math.hypot(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys)) / 2 || 1;
+    const lerp = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+
+    const rim = [];
+    const K = 4;
+    poly.points.forEach((a, i) => {
+      const b = poly.points[(i + 1) % poly.points.length];
+      for (let k = 0; k < K; k++) rim.push(lerp(a, b, (k + (k ? rnd() * 0.6 - 0.3 : 0)) / K));
+    });
+
+    const pieces = [];
+    rim.forEach((a, i) => {
+      const b = rim[(i + 1) % rim.length];
+      const cut = 0.35 + 0.3 * rnd();
+      const ia = lerp(c0, a, cut), ib = lerp(c0, b, cut);
+      for (const pts of [[c0, ia, ib], [ia, a, b, ib]]) {
+        const c = centroid(pts);
+        let angle = Math.atan2(c[1] - c0[1], c[0] - c0[0]);
+        if (Math.hypot(c[0] - c0[0], c[1] - c0[1]) < 1e-6) angle = rnd() * Math.PI * 2;
+        angle += (rnd() - 0.5) * 0.6;
+        pieces.push({
+          pts, c,
+          dir: [Math.cos(angle), Math.sin(angle)],
+          speed: size * (0.8 + 1.4 * rnd()), // how far it flies
+          spin: (rnd() - 0.5) * 8,           // radians over the burst
+        });
+      }
+    });
+
+    const burst = { c0, size, pieces };
+    bursts.set(key, burst);
+    if (bursts.size > 50) bursts.delete(bursts.keys().next().value);
+    return burst;
+  }
+
+  // One frame of a polygon's burst; `t` runs 0..1.
+  function drawBurst(ctx, map, poly, t) {
+    const { c0, size, pieces } = burstPieces(poly);
+    const path = (pts) => {
+      const px = pts.map(map);
+      if (px.some((p) => !p)) return false;
+      ctx.beginPath();
+      px.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+      ctx.closePath();
+      return true;
+    };
+    ctx.save();
+
+    // Flash of the whole shape (a fly's round hit area).
+    if (t < 0.25 && path(poly.points)) {
+      ctx.globalAlpha = 0.9 * (1 - t / 0.25);
+      ctx.fillStyle = '#fff';
+      ctx.fill();
+    }
+
+    // Shockwave: a circle in true geometry, so it lies flat on the surface.
+    const r = size * (0.3 + 1.7 * t);
+    const circle = Array.from({ length: 48 }, (_, i) => {
+      const a = (i / 48) * Math.PI * 2;
+      return [c0[0] + Math.cos(a) * r, c0[1] + Math.sin(a) * r];
+    });
+    if (path(circle)) {
+      ctx.globalAlpha = 0.8 * (1 - t);
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 3;
+      ctx.stroke();
+    }
+
+    // Pieces flying out, turning and shrinking as they fade.
+    const ease = 1 - Math.pow(1 - t, 3);
+    const scale = 1 - 0.6 * t;
+    for (const piece of pieces) {
+      const a = piece.spin * ease, cos = Math.cos(a), sin = Math.sin(a);
+      const ox = piece.c[0] + piece.dir[0] * piece.speed * ease;
+      const oy = piece.c[1] + piece.dir[1] * piece.speed * ease;
+      const moved = piece.pts.map(([x, y]) => {
+        const dx = (x - piece.c[0]) * scale, dy = (y - piece.c[1]) * scale;
+        return [ox + dx * cos - dy * sin, oy + dx * sin + dy * cos];
+      });
+      if (!path(moved)) continue;
+      ctx.globalAlpha = (piece.alpha ?? 1) * (1 - t * t);
+      ctx.fillStyle = piece.color || poly.color;
+      ctx.fill();
+      if (piece.color) continue; // sprite pixels stay crisp, without outlines
+      ctx.globalAlpha = 0.6 * (1 - t);
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // Ids of polygons containing at least one current detection. A pointer tag
+  // highlights the polygon it is aimed at rather than the one it sits in.
   function hitIds() {
     const ids = new Set();
-    for (const d of state.detections) polygonsAt(d).forEach((poly) => ids.add(poly.id));
+    for (const d of state.detections) {
+      if (d.aim) { if (d.aim.hit) ids.add(d.aim.hit.polyId); } else polygonsAt(d).forEach((poly) => ids.add(poly.id));
+    }
     return ids;
+  }
+
+  // ---- Pointer tags -----------------------------------------------------
+  // A pointer tag casts a narrow beam from its top edge; the beam stops at the
+  // first polygon edge it meets. Ported from prototype/pointer.js, with this
+  // app's polygons as the targets. Distances are in true-geometry units.
+
+  const BEAM = {
+    beamDeg: 2,      // half-angle of the beam
+    rays: 9,
+    nearDist: 10,    // pulse fastest at this distance or closer
+    farDist: 500,    // pulse slowest at this distance or further
+    fastMs: 125,     // 8 pulses a second
+    slowMs: 1000,    // 1 pulse a second
+  };
+
+  // Distance along the ray (o + t·d, |d| = 1) to the first edge of `poly`, or Infinity.
+  function rayToEdge(o, d, poly) {
+    let best = Infinity;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      const [ax, ay] = poly[j], [bx, by] = poly[i];
+      const ex = bx - ax, ey = by - ay;
+      const den = d[0] * ey - d[1] * ex;
+      if (Math.abs(den) < 1e-9) continue; // parallel
+      const qx = ax - o[0], qy = ay - o[1];
+      const t = (qx * ey - qy * ex) / den, u = (qx * d[1] - qy * d[0]) / den;
+      if (t > 1e-6 && u >= 0 && u <= 1 && t < best) best = t;
+    }
+    return best;
+  }
+
+  // The nearest polygon edge in the beam from `origin` along `heading`
+  // (radians, true-geometry axes). From outside a polygon the beam enters it;
+  // from inside it hits that polygon's own edge. Where two polygons share an
+  // edge, entering the neighbour wins. `selfR` is the tag's half-size, so the
+  // distance is measured from its front edge.
+  // Returns { polyId, name, inside, dist, pt } or null.
+  function castBeam(origin, heading, polygons, selfR = 0) {
+    const half = (BEAM.beamDeg * Math.PI) / 180;
+    const inside = polygons.map((p) => pointInPolygon(origin, p.points));
+    let best = null;
+    for (let i = 0; i < BEAM.rays; i++) {
+      const a = heading - half + (2 * half * i) / (BEAM.rays - 1);
+      const d = [Math.cos(a), Math.sin(a)];
+      const off = Math.abs(a - heading);
+      polygons.forEach((poly, k) => {
+        const t = rayToEdge(origin, d, poly.points);
+        if (t === Infinity) return;
+        const rank = inside[k] ? 1 : 0;
+        const better = !best || t < best.t - 0.5 ||
+          (Math.abs(t - best.t) <= 0.5 && (rank < best.rank || (rank === best.rank && off < best.off)));
+        if (better) best = { poly, inside: inside[k], t, a, rank, off };
+      });
+    }
+    if (!best) return null;
+    const name = best.poly.name || '(unnamed)';
+    return {
+      polyId: best.poly.id,
+      name: best.inside ? `the edge of ${name}` : name,
+      inside: best.inside,
+      dist: Math.max(0, best.t - selfR),
+      pt: [origin[0] + Math.cos(best.a) * best.t, origin[1] + Math.sin(best.a) * best.t],
+    };
+  }
+
+  // Pulse period for a target `dist` away: faster the closer it is.
+  function beamPeriodMs(dist) {
+    const f = Math.min(1, Math.max(0, (dist - BEAM.nearDist) / (BEAM.farDist - BEAM.nearDist)));
+    return BEAM.fastMs + (BEAM.slowMs - BEAM.fastMs) * f;
+  }
+
+  // Draw every pointer tag's beam through `map` (true geometry -> canvas
+  // pixels). A beam that hits something pulses, faster the closer the target;
+  // one that hits nothing is drawn dashed and steady.
+  function drawBeams(ctx, map, { setId = null } = {}) {
+    const now = performance.now();
+    for (const d of state.detections) {
+      if (!d.aim || (setId && d.setId !== setId)) continue;
+      const { heading, hit } = d.aim;
+      const from = map([d.x, d.y]);
+      const to = map(hit ? hit.pt : [d.x + Math.cos(heading) * 300, d.y + Math.sin(heading) * 300]);
+      if (!from || !to) continue;
+      const phase = hit ? (now % beamPeriodMs(hit.dist)) / beamPeriodMs(hit.dist) : 0;
+      const pulse = hit ? Math.exp(-phase * 5) : 0; // sharp flash, then fade
+      ctx.save();
+      ctx.strokeStyle = ctx.fillStyle = '#ffd23f';
+      ctx.lineCap = 'round';
+      ctx.globalAlpha = hit ? 0.4 + 0.6 * pulse : 0.5;
+      ctx.lineWidth = hit ? 3 + 3 * pulse : 2;
+      ctx.setLineDash(hit ? [] : [8, 8]);
+      ctx.beginPath();
+      ctx.moveTo(...from);
+      ctx.lineTo(...to);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      if (hit) {
+        ctx.beginPath();
+        ctx.arc(...to, 6, 0, Math.PI * 2);
+        ctx.fill();
+        if (d.aim.charge > 0) { // filling up towards blowing the target up
+          ctx.globalAlpha = 1;
+          ctx.strokeStyle = '#fff';
+          ctx.lineWidth = 4;
+          ctx.beginPath();
+          ctx.arc(...to, 18, -Math.PI / 2, -Math.PI / 2 + d.aim.charge * Math.PI * 2);
+          ctx.stroke();
+          ctx.strokeStyle = '#ffd23f';
+        }
+        ctx.globalAlpha = 1 - phase; // a ring spreading out from the hit point
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(...to, 6 + 22 * phase, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+  }
+
+  // Pages that only redraw when something changes need redrawing every frame
+  // while a beam is pulsing, a polygon is exploding or a fly is buzzing.
+  // Call after each update.
+  let animating = false;
+  const moving = () => state.detections.some((d) => d.aim)
+    || state.geometry.polygons.some((p) => isGone(p) || p.sprite);
+  function animate(render) {
+    if (animating || !moving()) return;
+    animating = true;
+    const step = () => {
+      render();
+      if (moving()) requestAnimationFrame(step);
+      else { animating = false; render(); } // one last frame with everything settled
+    };
+    requestAnimationFrame(step);
   }
 
   // One line of text per detection, for the sidebars.
@@ -342,6 +775,11 @@ const PM = (() => {
     if (!state.detections.length) return '—';
     return state.detections.map((d) => {
       const set = sets().find((s) => s.id === d.setId);
+      if (d.aim) {
+        const { hit } = d.aim;
+        return `cam ${d.view} ${d.name} · ${set ? set.name : '?'}: `
+          + (hit ? `aimed at ${hit.name}, ${Math.round(hit.dist)} away` : 'aimed at nothing');
+      }
       const inside = polygonsAt(d).map((p) => p.name || '(unnamed)');
       return `cam ${d.view} ${d.source} · ${set ? set.name : '?'}: (${Math.round(d.x)}, ${Math.round(d.y)})`
         + (inside.length ? `\n  in ${inside.join(', ')}` : '');
@@ -391,20 +829,31 @@ const PM = (() => {
     const hits = hitIds();
     for (const poly of state.geometry.polygons) {
       if (setId && poly.setId !== setId) continue;
+
+      // Blown up by a pointer: burst, then away, then fading back in.
+      const age = explodeAge(poly);
+      if (age >= 0 && age < EXPLODE.burstMs) { drawBurst(ctx, map, poly, age / EXPLODE.burstMs); continue; }
+      if (age >= 0 && age < EXPLODE.burstMs + EXPLODE.goneMs) continue;
+      const fade = age >= 0 ? Math.min(1, (age - EXPLODE.burstMs - EXPLODE.goneMs) / EXPLODE.fadeMs) : 1;
+      if (poly.sprite === 'fly') { drawFly(ctx, map, poly, fade, hits.has(poly.id)); continue; }
+
       const pts = poly.points.map(map);
       if (pts.some((p) => !p)) continue;
       ctx.beginPath();
       pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
       ctx.closePath();
+      // A polygon switched on (by a fingertip) is drawn solid; one with a
+      // detection inside it is brightened and outlined in white.
       const hit = hits.has(poly.id);
-      ctx.globalAlpha = hit ? Math.min(1, fillAlpha + 0.45) : fillAlpha;
+      ctx.globalAlpha = fade * (poly.on ? 1 : hit ? Math.min(1, fillAlpha + 0.25) : fillAlpha);
       ctx.fillStyle = poly.color;
       ctx.fill();
-      ctx.globalAlpha = 1;
+      ctx.globalAlpha = fade;
       ctx.lineWidth = poly.id === selectedId || hit ? 4 : 2;
       ctx.strokeStyle = hit ? '#fff' : poly.color;
       ctx.stroke();
-      if (labels && poly.name) {
+      ctx.globalAlpha = 1;
+      if (labels && poly.name && fade === 1) {
         const c = map(centroid(poly.points));
         if (c) drawLabel(ctx, poly.name, c[0], c[1]);
       }
@@ -524,7 +973,8 @@ const PM = (() => {
   }
 
   // Crosshair for a detected point.
-  function drawDetection(ctx, x, y) {
+  // `progress` (0..1, optional) draws a ring filling up towards a touch toggle.
+  function drawDetection(ctx, x, y, progress = 0) {
     ctx.strokeStyle = '#fff';
     ctx.lineWidth = 2;
     ctx.beginPath();
@@ -534,6 +984,12 @@ const PM = (() => {
     ctx.moveTo(x, y - 22); ctx.lineTo(x, y - 6);
     ctx.moveTo(x, y + 6); ctx.lineTo(x, y + 22);
     ctx.stroke();
+    if (progress > 0) {
+      ctx.lineWidth = 5;
+      ctx.beginPath();
+      ctx.arc(x, y, 28, -Math.PI / 2, -Math.PI / 2 + progress * Math.PI * 2);
+      ctx.stroke();
+    }
   }
 
   return {
@@ -543,7 +999,7 @@ const PM = (() => {
     openView, renderSetToggles, bindViewControls, publishDetections,
     polygonsAt, describeDetections, pickHandle, drawQuad, drawGrid, fillSetSelect,
     solveHomography, invertHomography, applyHomography,
-    pointInPolygon, centroid, hitIds, pick,
-    fitCanvas, drawPolygons, drawLabel, drawHandle, drawDetection,
+    pointInPolygon, centroid, hitIds, pick, castBeam, EXPLODE, isGone,
+    fitCanvas, drawPolygons, drawLabel, drawHandle, drawDetection, drawBeams, animate,
   };
 })();

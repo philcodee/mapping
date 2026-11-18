@@ -92,7 +92,8 @@
     const active = PM.activeSet();
     for (const set of [...PM.sets().filter((s) => s !== active), active]) PM.drawQuad(ctx, refsPx(set), set);
 
-    for (const d of state.detections) PM.drawDetection(ctx, ...toScreen([d.x, d.y]));
+    PM.drawBeams(ctx, toScreen);
+    for (const d of state.detections) if (!d.aim) PM.drawDetection(ctx, ...toScreen([d.x, d.y]), d.progress);
   }
 
   // ---- Pan and zoom -----------------------------------------------------
@@ -302,6 +303,7 @@
   PM.init((topic) => {
     editor.sync(topic);
     if (topic === 'detections') { detectedEl.textContent = PM.describeDetections(); render(); }
+    PM.animate(render); // pulsing pointer beams and explosions
   }, () => {
     PM.publish('geometry');
     PM.publish('active');

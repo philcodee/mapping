@@ -54,6 +54,7 @@
         <button id="reset">Reset A–D</button>
       </div>
       <select id="device" title="Which webcam to use" style="margin-top:8px"><option value="">Default webcam</option></select>
+      <label class="check" style="margin-top:8px"><input type="checkbox" id="rotate"> Rotate 180° (camera mounted upside down)</label>
       <p id="status" style="margin-top:8px"></p>
     </section>
 
@@ -63,11 +64,15 @@
         <option value="none">Pointer only</option>
         <option value="bright">Brightest spot (torch / laser)</option>
         <option value="motion">Motion</option>
+        <option value="hand">Hand (fingertip touches toggle polygons)</option>
       </select>
+      <label class="check" style="margin-top:8px"><input type="checkbox" id="tags"> Track pointer tags (ArUco 40, 41)</label>
       <label class="check" style="margin-top:8px">Sensitivity
         <input type="range" id="sensitivity" min="0" max="100" value="60">
       </label>
       <p style="margin-top:8px">With the Edit tool, hovering over the image also sends that point, so you can test the mapping without a camera.</p>
+      <p style="margin-top:8px">Pointer tags cast a beam from their printed top edge to the first polygon edge in front of them. The projector draws the beam and highlights its target, pulsing faster the closer it is. Hold a beam on a polygon for a second (a ring fills at the hit point) to blow it up; it comes back a few seconds later. They work alongside any detection mode.</p>
+      <p style="margin-top:8px">In Hand mode, hold an index fingertip on a polygon for a moment to switch it on or off. Lift it off and back on to switch it again. Hand tracking loads from the internet the first time it is picked.</p>
     </section>
 
     <section>
