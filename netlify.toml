@@ -1,0 +1,23 @@
+# Static site — no build step. Netlify serves the repo root as-is.
+[build]
+  publish = "."
+  command = ""
+
+# Allow the camera page to use the webcam (Netlify serves over HTTPS,
+# which getUserMedia requires).
+[[headers]]
+  for = "/*"
+  [headers.values]
+    Permissions-Policy = "camera=(self)"
+    X-Content-Type-Options = "nosniff"
+
+# Let the browser cache vendored libraries and marker images.
+[[headers]]
+  for = "/vendor/*"
+  [headers.values]
+    Cache-Control = "public, max-age=604800"
+
+[[headers]]
+  for = "/aruco/*"
+  [headers.values]
+    Cache-Control = "public, max-age=604800"
